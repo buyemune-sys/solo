@@ -3673,12 +3673,13 @@ namespace {
     }
 
     struct ShDlIterateContext: public ElfProgramHeaderCallback {
-        ShDlIterateContext(int (*callback)(dl_phdr_info*, size_t, void*), void* data);
+        ShDlIterateContext(int (*callback)(dl_phdr_info*, size_t, void*), void* data, unsigned long long adds);
 
         int call(const ElfProgramHeaders& image) override;
 
         int (*callback)(dl_phdr_info*, size_t, void*);
         void* data;
+        unsigned long long adds;
     };
 
     struct GlibcDlFindObject {
@@ -3704,9 +3705,10 @@ namespace {
     };
 }
 
-ShDlIterateContext::ShDlIterateContext(int (*callback)(dl_phdr_info*, size_t, void*), void* data)
+ShDlIterateContext::ShDlIterateContext(int (*callback)(dl_phdr_info*, size_t, void*), void* data, unsigned long long adds)
     : callback(callback)
     , data(data)
+    , adds(adds)
 {
 }
 
@@ -3718,6 +3720,7 @@ int ShDlIterateContext::call(const ElfProgramHeaders& image) {
     info.dlpi_phnum = image.count;
     info.dlpi_tls_modid = image.tlsModule;
     info.dlpi_tls_data = image.tlsData;
+    info.dlpi_adds = adds;
 
     return callback(&info, sizeof(info), data);
 }
@@ -3790,7 +3793,7 @@ namespace {
     static HostHeaders mainHostHeaders;
     static HostHeaders interpreterHostHeaders;
 
-    static int iterateMainProgramHeaders(int (*callback)(dl_phdr_info*, size_t, void*), void* data) {
+    static int iterateMainProgramHeaders(int (*callback)(dl_phdr_info*, size_t, void*), void* data, unsigned long long adds) {
         const auto program = elfMainProgram();
 
         if (program.count && !program.adopted) {
@@ -3807,6 +3810,7 @@ namespace {
             info.dlpi_phdr = hostHeaders(mainHostHeaders, program.headers, program.count);
             info.dlpi_phnum = program.count;
             info.dlpi_tls_modid = tls ? 1 : 0;
+            info.dlpi_adds = adds;
             if (const int result = callback(&info, sizeof(info), data); result) {
                 return result;
             }
@@ -3822,6 +3826,7 @@ namespace {
             info.dlpi_name = "solo";
             info.dlpi_phdr = hostHeaders(interpreterHostHeaders, interpreter.headers, interpreter.count);
             info.dlpi_phnum = interpreter.count;
+            info.dlpi_adds = adds;
             return callback(&info, sizeof(info), data);
         }
 
@@ -3855,13 +3860,19 @@ namespace {
     }
 }
 
+// dlpi_adds counts every object that ever joined the list and dlpi_subs those
+// that left it; memprof and sysprof compare the former against what they
+// already dumped to find new libraries. Nothing unloads, so subs stays zero.
 extern "C" int dl_iterate_phdr(int (*callback)(dl_phdr_info*, size_t, void*), void* data) {
-    const int hostResult = iterateMainProgramHeaders(callback, data);
+    const auto program = elfMainProgram();
+    unsigned long long adds = ElfImage::loadCount() + (program.count && !program.adopted) + (elfInterpreterImage().count != 0);
+
+    const int hostResult = iterateMainProgramHeaders(callback, data, adds);
     if (hostResult) {
         return hostResult;
     }
 
-    ShDlIterateContext context(callback, data);
+    ShDlIterateContext context(callback, data, adds);
     return ElfImage::iterateProgramHeaders(context);
 }
 

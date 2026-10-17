@@ -387,6 +387,7 @@ namespace {
 
         bool findAddress(const void* address, ElfAddress* res);
         int iterateProgramHeaders(ElfProgramHeaderCallback& callback);
+        uint64_t loadCount();
 
         void* callerThunk(LinkMap& image, bool dlmopen);
         LinkMap* callerImage(unsigned index);
@@ -436,6 +437,8 @@ namespace {
         // mapping order; relocated back-to-front once complete.
         std::vector<LinkMap*> closure_;
         LinkMap* mainExecutable_ = nullptr;
+        // Images that ever reached Ready: dl_iterate_phdr's dlpi_adds.
+        uint64_t loads_ = 0;
         std::vector<LinkMap*> pendingInitializers_;
         bool bindNow_ = false;
         bool debugLibs_ = false;
@@ -983,6 +986,7 @@ void Loader::completeImage(LinkMap& image) {
     }
 
     image.state = LinkMap::State::Ready;
+    ++loads_;
     if (image.executable) {
         mainExecutable_ = &image;
     }
@@ -1318,6 +1322,12 @@ int Loader::iterateProgramHeaders(ElfProgramHeaderCallback& callback) {
     }
 
     return 0;
+}
+
+uint64_t Loader::loadCount() {
+    std::lock_guard lock(mutex_);
+
+    return loads_;
 }
 
 LinkMap* Loader::findByName(const std::string_view& name) const noexcept {
@@ -2656,6 +2666,10 @@ bool ElfImage::findAddress(const void* address, ElfAddress* res) {
 
 int ElfImage::iterateProgramHeaders(ElfProgramHeaderCallback& callback) {
     return Loader::instance().iterateProgramHeaders(callback);
+}
+
+uint64_t ElfImage::loadCount() {
+    return Loader::instance().loadCount();
 }
 
 // The linker places __ehdr_start on the executable's ELF header whenever a

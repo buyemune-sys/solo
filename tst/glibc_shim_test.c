@@ -940,6 +940,18 @@ static int unrebasedDynamic(struct dl_phdr_info* info, size_t size, void* data) 
     return 0;
 }
 
+/* The lowest dlpi_adds any image reports: every object that ever joined the
+ * list counts, so it covers at least the images walked now. */
+static int lowestAdds(struct dl_phdr_info* info, size_t size, void* data) {
+    unsigned long long* lowest = data;
+
+    (void)size;
+    if (info->dlpi_adds < *lowest) {
+        *lowest = info->dlpi_adds;
+    }
+    return 0;
+}
+
 static void dynamicLinking(void) {
     void* handle = dlopen(NULL, RTLD_LAZY);
 
@@ -974,6 +986,9 @@ static void dynamicLinking(void) {
     int unrebased = 0;
     CHECK(dl_iterate_phdr(unrebasedDynamic, &unrebased) == 0);
     CHECK(unrebased == 0);
+    unsigned long long adds = ~0ULL;
+    CHECK(dl_iterate_phdr(lowestAdds, &adds) == 0);
+    CHECK(adds >= (unsigned long long)images);
 
     /* dlmopen: the base namespace is plain dlopen, a fresh namespace is
      * declined through dlerror (libcuda imports it and probes). */
