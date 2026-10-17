@@ -3757,6 +3757,39 @@ int ShDlFindObjectContext::call(const ElfProgramHeaders& image) {
 }
 
 namespace {
+    // The bridge's own image is no object ld.so loaded: its dynamic section
+    // still holds the link-time offsets its static-PIE startup relocated
+    // from, which walkers would take for the addresses ld.so leaves there.
+    // Its entries go out with that header blanked to PT_NULL.
+    struct HostHeaders {
+        const Elf64_Phdr* source = nullptr;
+        Elf64_Phdr copy[32];
+    };
+
+    static const Elf64_Phdr* hostHeaders(HostHeaders& host, const Elf64_Phdr* headers, Elf64_Half count) {
+        if (count > sizeof(host.copy) / sizeof(host.copy[0])) {
+            return headers;
+        }
+        if (__atomic_load_n(&host.source, __ATOMIC_ACQUIRE) != headers) {
+            // Element by element, final values only: a racing first walk
+            // rewrites the same bytes and never shows a reader PT_DYNAMIC.
+            for (Elf64_Half index = 0; index < count; ++index) {
+                Elf64_Phdr header = headers[index];
+
+                if (header.p_type == PT_DYNAMIC) {
+                    header.p_type = PT_NULL;
+                }
+                host.copy[index] = header;
+            }
+            __atomic_store_n(&host.source, headers, __ATOMIC_RELEASE);
+        }
+
+        return host.copy;
+    }
+
+    static HostHeaders mainHostHeaders;
+    static HostHeaders interpreterHostHeaders;
+
     static int iterateMainProgramHeaders(int (*callback)(dl_phdr_info*, size_t, void*), void* data) {
         const auto program = elfMainProgram();
 
@@ -3771,7 +3804,7 @@ namespace {
             dl_phdr_info info{};
             info.dlpi_addr = program.base;
             info.dlpi_name = "/proc/self/exe";
-            info.dlpi_phdr = program.headers;
+            info.dlpi_phdr = hostHeaders(mainHostHeaders, program.headers, program.count);
             info.dlpi_phnum = program.count;
             info.dlpi_tls_modid = tls ? 1 : 0;
             if (const int result = callback(&info, sizeof(info), data); result) {
@@ -3787,7 +3820,7 @@ namespace {
             dl_phdr_info info{};
             info.dlpi_addr = interpreter.base;
             info.dlpi_name = "solo";
-            info.dlpi_phdr = interpreter.headers;
+            info.dlpi_phdr = hostHeaders(interpreterHostHeaders, interpreter.headers, interpreter.count);
             info.dlpi_phnum = interpreter.count;
             return callback(&info, sizeof(info), data);
         }

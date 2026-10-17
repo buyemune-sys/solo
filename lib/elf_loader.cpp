@@ -237,6 +237,7 @@ namespace {
         std::vector<Elf64_Phdr> programHeaders;
 
         Elf64_Dyn* dynamic = nullptr;
+        bool dynamicWritable = false;
         const char* strings = nullptr;
         size_t stringsSize = 0;
         Elf64_Sym* symbols = nullptr;
@@ -309,6 +310,7 @@ namespace {
         bool adopted = false;
 
         void parseDynamic();
+        void rebaseDynamic();
         void parseVersions(uintptr_t needAddress, size_t needCount, uintptr_t definitionAddress, size_t definitionCount);
         void setVersionName(size_t index, size_t nameOffset);
         size_t countSymbols() const noexcept;
@@ -794,6 +796,7 @@ LinkMap* Loader::load(const std::string_view& requestedPath, int flags, LinkMap*
             }
         } else if (programHeader.p_type == PT_DYNAMIC) {
             image.dynamic = reinterpret_cast<Elf64_Dyn*>(image.base + programHeader.p_vaddr);
+            image.dynamicWritable = (programHeader.p_flags & PF_W) != 0;
         } else if (programHeader.p_type == PT_GNU_RELRO) {
             image.relroStart = programHeader.p_vaddr;
             image.relroSize = programHeader.p_memsz;
@@ -880,6 +883,7 @@ LinkMap* Loader::adopt(const char* path, const Elf64_Phdr* headers, size_t count
             maximumAddress = std::max(maximumAddress, alignUp(programHeader.p_vaddr + programHeader.p_memsz, pageSize));
         } else if (programHeader.p_type == PT_DYNAMIC) {
             image.dynamic = reinterpret_cast<Elf64_Dyn*>(image.base + programHeader.p_vaddr);
+            image.dynamicWritable = (programHeader.p_flags & PF_W) != 0;
         } else if (programHeader.p_type == PT_GNU_RELRO) {
             image.relroStart = programHeader.p_vaddr;
             image.relroSize = programHeader.p_memsz;
@@ -929,6 +933,7 @@ void Loader::prepareImage(LinkMap& image, int flags, bool adopted) {
         allocateStaticTls(image);
     }
     image.parseDynamic();
+    image.rebaseDynamic();
     if (!image.soname.empty()) {
         imagesByName_.emplace(image.soname, &image);
     }
@@ -1678,6 +1683,35 @@ void LinkMap::parseVersions(uintptr_t needAddress, size_t needCount, uintptr_t d
                 break;
             }
             definition = reinterpret_cast<Elf64_Verdef*>(reinterpret_cast<char*>(definition) + definition->vd_next);
+        }
+    }
+}
+
+// ld.so rebases the address-valued entries of a writable dynamic section in
+// place, and walkers of PT_DYNAMIC read them that way: LuaJIT's memprof and
+// sysprof take DT_STRTAB, DT_SYMTAB and the hash tables found through
+// dl_iterate_phdr as addresses. The tags are glibc's; parseDynamic has
+// already cached everything the loader itself reads.
+void LinkMap::rebaseDynamic() {
+    if (!dynamicWritable) {
+        return;
+    }
+    for (auto* entry = dynamic; entry->d_tag != DT_NULL; ++entry) {
+        switch (entry->d_tag) {
+            case DT_HASH:
+            case DT_PLTGOT:
+            case DT_STRTAB:
+            case DT_SYMTAB:
+            case DT_RELA:
+            case DT_REL:
+            case DT_JMPREL:
+            case DT_VERSYM:
+            case DT_GNU_HASH:
+            case DT_RELR:
+                entry->d_un.d_ptr += base;
+                break;
+            default:
+                break;
         }
     }
 }
